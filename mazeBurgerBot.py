@@ -1,52 +1,31 @@
-#mazeBurgerBot.py
-# motor and encoder libraries
-from encoder_rp2 import Encoder as enc # switched to this library rather than Pimoroni
-from motor import Motor, pico_motor_shim
-from pimoroni import PID, Button
-#standard libraries
-from machine import Pin
-import time
 import gc
+import time
+from motor import Motor, pico_motor_shim
+from encoder import Encoder, MMME_CPR
+from pimoroni import Button, PID, NORMAL_DIR   , REVERSED_DIR
 #range sensors
 from hcsr04 import HCSR04
 import _thread
+from machine import Pin
+"""
+mazeBurgerBot.py
+attempts to solve PI Wars Maze challenge
 
-# Free up hardware resources ahead of creating a new Encoder
-gc.collect()
-#create motors
-SPEED_SCALE = 1.0
-mLeft = Motor(pico_motor_shim.MOTOR_2, direction=0, speed_scale=SPEED_SCALE)
-leftEnc = enc(0, Pin(14))
-mRight = Motor(pico_motor_shim.MOTOR_1, direction=0, speed_scale=SPEED_SCALE)
-rightEnc = enc(1, Pin(16))
-# i have created this to aid debugging
-# it does show that    i do not need global refernce to leftEnc
-def readEncoder(position):
-    print("line : {0} value {1}".format(position,leftEnc.value() ))
-    mLeft.speed(-0.5)
-    time.sleep(1.)
-    print(leftEnc.value())
-    mLeft.speed(0)
+this version has been tidied up to use functions amd the Pimoroni encoder library
+I have also removed the PID control and just a straight gain.
+Probably gone overboard with defining variables as  global because I get the occassional
+variable not defined error, e.g. sonars
+At the moment, if the robot is left moving forward for (say) 20 seconds the right motor
+stops. Then if I put my hand in front (Robot on a test stand) to simulare reaching a
+wall, the code steps to making a turn and the left motor stops.
+"""
+def readEncoders():
+    # Print out the angle of each encoder
+    global encleft, encRight
+    print("encLeft =", encLeft.count(), end=", ")
+    print("encRight =", encRight.count(), end=", ")
+    print()
 
-
-# range sensors
-# sonar
-# a timeout of 10000 micro secs is 10msecs or 100Hz
-# so worst case could take 30 msecs to read all sensors
-
-frontSonar = HCSR04(trigger_pin=18, echo_pin=20, echo_timeout_us=10000)
-leftSensor = HCSR04(trigger_pin=10, echo_pin=11, echo_timeout_us=10000)
-rightSensor = HCSR04(trigger_pin=13, echo_pin=12, echo_timeout_us=10000)
-
-
-sonarValues = [-10, -10, -10] # initialise to invalid values [0] is left [1] is forward [2] is right
-sonars = [leftSensor, frontSonar , rightSensor]
-distanceLock = _thread.allocate_lock()
-time.sleep(2) # try a delay to make sure sonars has been defined
-
-
-
-# define function for second thread to read all 3 sensors
 def readAllSonars():
     global sonarValues, sonars, distanceLock
     localValues = [-10, -10, -10]
@@ -58,41 +37,152 @@ def readAllSonars():
         distanceLock.release()
         time.sleep_us(1000 ) #(500000)
 
-# now start thread
-_thread.start_new_thread(readAllSonars, () )
+def getNewRange():
+    global distanceLock, sonarValues
+    
+    distanceLock.acquire()
+    newValues = sonarValues
+    distanceLock.release()
+    return newValues
 
-# everything based on cycle time
-UPDATES = 100                           # How many times to update the motor per second
-UPDATE_RATE = 1 / UPDATES
-UPDATE_RATE_MSECS = 1000 * UPDATE_RATE
-iterationMax = int(10 / UPDATE_RATE) # 10 seconds
-twoSeconds = int(2 / UPDATE_RATE)
-modFactor = int(iterationMax/5)
-print(modFactor)
-# Create PID object for position control
-# PID values
-POS_KP =0.027# 0.025                           # POS proportional (P) gain
-POS_KI = 0.5625#.02                            # POS integral (I) gain
-POS_KD = 0.0003375#.0001    
-pos_pid_left = PID(POS_KP, POS_KI, POS_KD, UPDATE_RATE)
-pos_pid_right = PID(POS_KP, POS_KI, POS_KD, UPDATE_RATE)
-demand = 700#1400#2800
-pos_pid_left.setpoint = 0#demand
-pos_pid_right.setpoint = 0#demand
+def legForwards():
+        global legMode, mode, moveLeftMode, moveRightMode, forwardsMode, stopMode
+        global leftDemand, rightDemand 
+        global minDistance, frontDistance, leftDistance, rightDistance,edgeLimit
+        global iterationCount, startLeftRightTurn, turnDelay
+        global leftrevspersec,rightrevspersec
+        global led, encLeft, encRight, mLeft, mRight, leftVel, rightVel
+        # mode logic
+        #print(mode, frontDistance)
+        led.off()
+        if minDistance < frontDistance < 250  : # safe to move forward
+            #print("safe to move forward {0}".format(frontDistance) )
+            if mode == moveLeftMode or mode == moveRightMode :
+                #print("firstError {0} latest Error {1}".format(firstError, error))
+                #if error * firstError < 0: # sign change so back on centreline
+                if iterationCount - startLeftRightTurn > turnDelay:
+                    mode = forwardsMode
+                    leftVel  = leftrevspersec
+                    rightVel  = rightrevspersec
+                    #print("left speed {0}  right speed {1}".format(leftVel,rightVel))
+            elif edgeLimit > leftDistance : # in side left limit so move right
+                mode = moveRightMode
+                startLeftRightTurn = iterationCount
+                turnDelay = 0
+                leftVel  = leftrevspersec
+                rightVel = turnrevspersec
+                #print("left speed {0}  right speed {1}".format(leftVel,rightVel))
+                #print("firstError {0}".format(firstError))
+            elif rightDistance < edgeLimit:
+                mode = moveLeftMode
+                leftVel  = turnrevspersec
+                rightVel = rightrevspersec
+                startLeftRightTurn = iterationCount
+                turnDelay = 1
+                #print("left speed {0}  right speed {1}".format(leftVel,rightVel))
+                #print("firstError {0}".format(firstError))
+            elif mode == forwardsMode : # reset to forwards mode to aid testing
+                leftVel  = leftrevspersec
+                rightVel = rightrevspersec
+                #print("left speed {0}  right speed {1}".format(leftVel,rightVel))
+            else : # mode must be stop
+                mode = forwardsMode
+                leftVel= leftrevspersec
+                rightVel = rightrevspersec
+        elif frontDistance < minDistance : # too close to front wall so turn
+            legMode+=1 # need general logic to go onto next leg, turnright and left can be achieved by changing setpoint
+            mode = stopMode
+            leftVel = 0
+            rightVel = 0
+            encLeft.zero()
+            encRight.zero()
+            count4Ninetydegs = 700
+            if legMode > 4:
+                leftDemand = -count4Ninetydegs
+                rightDemand = count4Ninetydegs
+            else:
+                leftDemand = count4Ninetydegs
+                rightDemand = -count4Ninetydegs
+            print("start turn {0}".format(legMode))
 
-iterationCount = 0
-maxSpeed = 1
-#error = demand - leftEnc.value()
-errorThreshold = -1
-pastErrors = [ 0 for i in range(300) ]
-times = [ 0, 0, 0, 0, 0, 0,0, 0, 0, 0, 0, 0]
+        else: # stop invalid reading
+            leftVel = 0
+            rightVel = 0
+            led.on()
+            
+            
+        mLeft.speed(leftVel)
+        mRight.speed(rightVel)
 
-'''
-wheel speed of 1 rev/second
-is encoder count of 2800 / second
-so position update is 2800 * UPDATE_RATE
-top speed about 1.3 revs/sec at wheel
-'''
+def legTurn(): # direction specified by setting setpoint
+    global leftDemand, rightDemand, legMode,  mLeft, mRight, encLeft, encRight
+    
+    def calcrateDemand(position, demand):
+        error = (demand - position )
+        return error * 0.025
+    
+    lPos = encLeft.count()
+    leftVel = calcrateDemand(lPos , leftDemand)
+    mLeft.speed(leftVel)
+    
+    rPos = encRight.count()
+    rightVel = calcrateDemand(rPos , rightDemand)
+    mRight.speed(rightVel)
+    
+    # add logic to detect when turn complete monitor error ?
+    x = lPos - leftDemand
+    y = rPos - rightDemand
+    error = (x)**2 + (y)**2
+    #print(error, leftDemand,rightDemand, lPos, rPos )
+    if  error < 10: # look for errors < 2 counts in both axes
+        legMode+=1
+        leftVel = 0
+        rightVel = 0
+        mLeft.speed(leftVel)
+        mRight.speed(rightVel)
+        encLeft.zero()
+        encRight.zero()
+        print("Turn complete ", lPos, rPos)
+        time.sleep(1)
+def stop():
+    mLeft.speed(0)
+    mRight.speed(0)
+def finished():
+    global legMode, letsGo
+    legMode+=1
+    letsGo = False
+    print("finished")
+
+# Free up hardware resources ahead of creating a new Encoder
+gc.collect()
+
+MOTOR_PINS_RIGHT = pico_motor_shim.MOTOR_1          # The pins of the motor being profiled
+MOTOR_PINS_LEFT = pico_motor_shim.MOTOR_2          # The pins of the motor being profiled
+ENCODER_PINS_RIGHT = (16,17) #(17, 16)      # The pins of the encoder attached to the profiled motor
+ENCODER_PINS_LEFT = (15,14) #(17, 16)      # The pins of the encoder attached to the profiled motor
+GEAR_RATIO = 100                         # The gear ratio of the motor
+COUNTS_PER_REV = 28 * GEAR_RATIO  # The counts per revolution of the motor's output shaft
+DIRECTION = NORMAL_DIR
+SPEED_SCALE = 1.0
+# The direction to spin the motor in. NORMAL_DIR (0), REVERSED_DIR (1)
+# Create an encoder, using PIO 0 and State Machine 0
+# Create an encoder, using PIO 0 and State Machine 0
+encLeft  = Encoder(0, 0, ENCODER_PINS_LEFT, direction=DIRECTION, counts_per_rev=COUNTS_PER_REV, count_microsteps=True)
+encRight = Encoder(1, 0, ENCODER_PINS_RIGHT, direction=REVERSED_DIR, counts_per_rev=COUNTS_PER_REV, count_microsteps=True)
+# Create a motor and set its speed scale
+mLeft  = Motor(MOTOR_PINS_LEFT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
+mRight = Motor(MOTOR_PINS_RIGHT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
+mRight = Motor(MOTOR_PINS_RIGHT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
+
+# create led
+led = Pin(25, Pin.OUT)
+# Create the user button
+
+user_sw = Button(pico_motor_shim.BUTTON_A)
+# Enable the motor to get started
+mLeft.enable()
+mRight.enable()
+
 revspersec = 0.9 # for test 1
 turnrevspersec = 0.6
 '''
@@ -109,205 +199,96 @@ c = 0.001 - 0.5*0.03 => c = -0.014
 so for m= 1
 offset = 0.03*1--0.014 = 0.044
 '''
+# speed defintions
 offsetrevspersec = 0.014  #speed dependant - offset to move in straight linr
 leftrevspersec = revspersec + offsetrevspersec   
 rightrevspersec = revspersec
-#below required for PID conrol only
-defaultSpeed = 2800 * revspersec * UPDATE_RATE
-turnSpeed = 2800 * turnrevspersec * UPDATE_RATE
-leftSpeed = defaultSpeed
-rightSpeed = defaultSpeed
-print (" defaultSpeed = {0} turnSpeed = {1}".format(defaultSpeed, turnSpeed) )
+leftVel = 0
+rightVel= 0
+#######################################################################
+# sonar
+# a timeout of 10000 micro secs is 10msecs or 100Hz
+# so worst case could take 30 msecs to read all sensors
+
+frontSonar = HCSR04(trigger_pin=18, echo_pin=20, echo_timeout_us=10000)
+leftSensor = HCSR04(trigger_pin=10, echo_pin=11, echo_timeout_us=10000)
+rightSensor = HCSR04(trigger_pin=13, echo_pin=12, echo_timeout_us=10000)
+
+sonarValues = [-10, -10, -10] # initialise to invalid values [0] is left [1] is forward [2] is right
+sonars = [leftSensor, frontSonar , rightSensor]
+distanceLock = _thread.allocate_lock()
+#######################################################################
+_thread.start_new_thread(readAllSonars, () )
+# mode defintion within a Legmode
 stopMode = 0
 forwardsMode = 1
 moveLeftMode = 2
 moveRightMode = 3
 mode = forwardsMode
+modeText = ["stop","forwards","left","right"]
 lastmode = -1
-# create led
-led = Pin(25, Pin.OUT)
-# Create the user button
-user_sw = Button(pico_motor_shim.BUTTON_A)
-
-# mode definitions and safe distances
-minDistance = 25.0
-stopMode = 0
-forwardsMode = 1
-moveLeftMode = 2
-modeRightMode = 3
-mode = forwardsMode
 legModeText = ["Forwards", "Right", "Forwards", "Right", "Forwards", "Left", "Forwards", "Left", "Forwards", "Stop"]
 legMode = 0 # Forwards
-oldlegMode = -1
-startLeftRightTurn = 0
-turnDelay = 2
-modeText = ["stop","forwards","left","right"]
-lastMode = -1
+caseStatement = {
+    0: legForwards,
+    1: legTurn,
+    2: legForwards,
+    3: legTurn,
+    4: legForwards,
+    5: legTurn,
+    6: legForwards,
+    7: legTurn,
+    8: legForwards,
+    9: finished,
+    10: stop
+    }
+# distances
+minDistance = 25.0
+edgeLimit = 4
+# everything based on cycle time
+UPDATES = 100                           # How many times to update the motor per second
+UPDATE_RATE = 1 / UPDATES
+UPDATE_RATE_MSECS = 1000 * UPDATE_RATE
+iterationCount = 0
+[leftDistance, frontDistance, rightDistance] = getNewRange()
+timeSlots = [0 for i in range(11)]
 
-
-readEncoder(148)
-
-def legForwards():
-        global mode, legMode
-        # mode logic
-        distanceLock.acquire()
-        newValues = sonarValues
-        distanceLock.release()
-    
-        frontDistance = newValues[1] 
-        leftReading = newValues[0]
-        rightReading = newValues[2]
-        
-        if minDistance < frontDistance < 250  : # safe to move forward
-            #print("safe to move forward {0}".format(frontDistance) )
-            if mode == moveLeftMode or mode == modeRightMode :
-                
-                if iterationCount - startLeftRightTurn > turnDelay:
-                    mode = forwardsMode
-                    leftVel  = leftrevspersec
-                    rightVel  = rightrevspersec
-                    
-            elif edgeLimit > leftReading : # in side left limit so move right
-                mode = moveRightMode
-                
-                startLeftRightTurn = iterationCount
-                turnDelay = 0
-                leftVel  = leftrevspersec
-                rightVel = turnrevspersec
-                
-            elif rightReading < edgeLimit:
-                mode = moveLeftMode
-                leftVel  = turnrevspersec
-                rightVel = rightrevspersec
-                startLeftRightTurn = iterationCount
-                turnDelay = 1
-            elif mode == forwardsMode : # reset to forwards mode to aid testing
-                leftVel  = leftrevspersec
-                rightVel = rightrevspersec
-            else : # mode must be stop
-                mode = forwardsMode
-                leftVel= leftrevspersec
-                rightVel = rightrevspersec
-        else :
-            legMode+=1 # need general logic to go onto next leg, turnright and left can be achieved by changing setpoint
-            print("frontDistance = {0}".format(frontDistance))
-            mode = stopMode
-            leftVel = 0
-            rightVel = 0
-            print("leftEnc {0}".format(leftEnc.value()))
-            leftEnc.value(0)
-            print("leftEnc {0}".format(leftEnc.value()))
-            rightEnc.value(0)
-            pos_pid_left.setpoint = 700
-            pos_pid_right.setpoint = -700
-            
-            
-        mLeft.speed(-leftVel)
-        mRight.speed(-rightVel)
-
-
-readEncoder(209)
-def legTurn(lPos, rPos): # direction specified by setting setpoint
-    leftVel = pos_pid_left.calculate(lPos)
-    mLeft.speed(leftVel)
-    
-    rightVel = pos_pid_right.calculate(rPos)
-    mRight.speed(rightVel)
-    print(lPos, leftVel, rPos, rightVel)
-    # add logic to detect when turn complete monitor error ?
-    error = (lPos - pos_pid_left.setpoint)**2 + (rPos - pos_pid_right.setpoint)**2
-    #print ("error = {0}".format(error) )
-    if error < 8: # look for errors < 2 counts in both axes
-        print ("error = {0}".format(error) )
-        legMode+=1
-        leftVel = 0
-        rightVel = 0
-        leftEnc.value(0)
-        rightEnc.value(0)
-        pos_pid_left.setpoint = 0
-        pos_pid_right.setpoint = 0
-
-readEncoder(230)
-
-#wait for a button press before starting
+#delay to get set up
 led.on()
-print("press button when ready")
 while not user_sw.raw():
     pass
-print("pressed")
-led.off() # put led off after button has been read
-time.sleep(10) # delay to put robot down in course
-
-# get initial values and calculate width, threshaolds etc
-distanceLock.acquire()
-newValues = sonarValues
-distanceLock.release()
-
-
-
-edgeLimit = 4
-
+led.off()
 time.sleep(1)
-
+print(gc.mem_alloc() )
+print(gc.mem_free() )
+gc.enable
 letsGo = True
-
-########################################
-tBegin = time.ticks_ms()
-#try:
-while  (not user_sw.raw()) and letsGo == True :
+# Read the encoders until the user button is pressed
+while not user_sw.raw() and letsGo:
     timeStart = time.ticks_ms() # get time to calculate loop time
     iterationCount+=1
-
-    if legMode == 0:
+    [leftDistance, frontDistance, rightDistance] = getNewRange()
+    #print(leftDistance, frontDistance, rightDistance)
+    #readEncoders()
+    if frontDistance > 0:
         
-        legForwards()
-        
-    elif legMode == 1:
-        lPos = leftEnc.value()
-        rPos = rightEnc.value()
-        print("legmode == 1:{0} {1}".format(lPos, rPos))
-        legTurn(lPos, rPos) # try passing encoders through call
-
-    if legMode != oldlegMode:
-        print("new legMode= {0}".format(legModeText[legMode]))
-        oldlegMode = legMode
+        if legMode <= len(caseStatement):
+            caseStatement[legMode]()
+        else:
+            stop()
     
-
-    if lastmode != mode:
         
-        print("mode changed from {0} to {1}".format( modeText[lastmode], modeText[mode] ) )
-        lastmode = mode
-    
-    # calcuate how long this lolop took
+    # calculate cycle delay
     iterTime = time.ticks_diff(time.ticks_ms() , timeStart )
-    
-    index = int(iterTime)
-    
-    # capture execution times
-    if index > 10:
-        index = 10
-    times[index] +=1
-    
+    # determine processing time as multiples of 1 mSec from 1 to 10
+    intTime = int(iterTime)
+    if intTime > 10:
+        intTime = 10
+    timeSlots[intTime]+=1
     delayTime = int(UPDATE_RATE_MSECS - iterTime)
-    #print(delayTime, UPDATE_RATE_MSECS, iterTime)
     if delayTime > 0 :
         time.sleep_ms(delayTime)
     
-
-
-
-#except Exception as ex :
-#    print("exception mode = {0} ".format(mode) )
-#    template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-#    message = template.format(type(ex).__name__, ex.args)
-#    print (message)
-
-# while loop has ended so stop motors
-mLeft.speed(0)
-mRight.speed(0)
-# indicate why we stopped
-if letsGo:
-    led.on()
-else:
-    led.off()
-print(times)
+print(timeSlots)
+print(gc.mem_alloc() )
+print(gc.mem_free() )
