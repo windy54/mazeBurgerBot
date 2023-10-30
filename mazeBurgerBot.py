@@ -15,9 +15,7 @@ this version has been tidied up to use functions amd the Pimoroni encoder librar
 I have also removed the PID control and just a straight gain.
 Probably gone overboard with defining variables as  global because I get the occassional
 variable not defined error, e.g. sonars
-At the moment, if the robot is left moving forward for (say) 20 seconds the right motor
-stops. Then if I put my hand in front (Robot on a test stand) to simulare reaching a
-wall, the code steps to making a turn and the left motor stops.
+
 """
 def readEncoders():
     # Print out the angle of each encoder
@@ -143,7 +141,7 @@ def legTurn(): # direction specified by setting setpoint
         encLeft.zero()
         encRight.zero()
         print("Turn complete ", lPos, rPos)
-        time.sleep(1)
+        
 def stop():
     mLeft.speed(0)
     mRight.speed(0)
@@ -172,7 +170,7 @@ encRight = Encoder(1, 0, ENCODER_PINS_RIGHT, direction=REVERSED_DIR, counts_per_
 # Create a motor and set its speed scale
 mLeft  = Motor(MOTOR_PINS_LEFT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
 mRight = Motor(MOTOR_PINS_RIGHT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
-mRight = Motor(MOTOR_PINS_RIGHT, direction=REVERSED_DIR, speed_scale=SPEED_SCALE)
+
 
 # create led
 led = Pin(25, Pin.OUT)
